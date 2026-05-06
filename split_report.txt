@@ -1,0 +1,5 @@
+STEP 3: DATA SPLIT SUMMARY
+Features used: ['zone_id', 'temperature', 'rainfall_mm', 'humidity', 'harvest_quantity', 'transport_cost', 'market_demand_index', 'prev_day_price']
+Training set size: 79996
+Testing set size: 19999
+Method: Chronological Split (80/20)
