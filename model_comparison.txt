@@ -1,0 +1,6 @@
+FINAL MODEL EVALUATION
+Linear Regression: R2=0.7695
+Decision Tree: R2=0.3935
+Random Forest: R2=0.9384
+Gradient Boosting: R2=0.9305
+XGBoost: R2=0.9497
