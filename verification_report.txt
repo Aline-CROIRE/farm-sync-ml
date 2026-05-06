@@ -1,0 +1,4 @@
+DATA VERIFICATION SUCCESSFUL
+Missing Values: 0
+Price Range: 200-1200
+Total Records: 100,000
