@@ -24,11 +24,11 @@ ENV/
 .env.*.local
 secrets.json
 
-# ── ML models (keep the seed fallback, ignore generated versions) ──────────
-models/xgboost_v[0-9]*.joblib
+# ── ML models ─────────────────────────────────────────────────────────────
+# Ignore timestamp-versioned retrained models (e.g. xgboost_v20240512_1400.joblib)
+# but KEEP xgboost_v1.joblib — it is the seed/fallback committed to git
+models/xgboost_v[0-9][0-9][0-9][0-9]*.joblib
 models/*.pkl
-# Uncomment to also ignore the seed model (if storing in R2 only):
-# models/xgboost_v1.joblib
 
 # ── Data files ─────────────────────────────────────────────────────────────
 *.csv

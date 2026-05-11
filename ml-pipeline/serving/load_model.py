@@ -22,10 +22,20 @@ FEATURE_NAMES: list[str] = [
 _LOCAL_FALLBACK = Path(__file__).parent.parent / "models" / "xgboost_v1.joblib"
 
 
-def _asyncpg_url() -> str:
-    """Convert any postgresql:// or postgresql+asyncpg:// URL to plain asyncpg format."""
+def _asyncpg_url() -> tuple[str, dict]:
+    """
+    Return (url, connect_kwargs) ready for asyncpg.connect().
+    Strips sslmode=require (asyncpg rejects it) and passes ssl via kwargs.
+    """
+    import ssl  # noqa: PLC0415
     url = os.environ.get("DATABASE_URL", "")
-    return url.replace("postgresql+asyncpg://", "postgresql://")
+    needs_ssl = "sslmode=require" in url
+    for token in ("?sslmode=require", "&sslmode=require", "sslmode=require&"):
+        url = url.replace(token, "")
+    # asyncpg wants plain postgresql://, not postgresql+asyncpg://
+    url = url.replace("postgresql+asyncpg://", "postgresql://")
+    kwargs = {"ssl": ssl.create_default_context()} if needs_ssl else {}
+    return url, kwargs
 
 
 @dataclass
@@ -73,12 +83,12 @@ def _from_local(path: Path, version: str) -> ModelBundle:
 
 async def _fetch_from_db() -> tuple[bytes, str] | None:
     """Query model_versions for the active model's binary. Returns (data, version) or None."""
-    url = _asyncpg_url()
+    url, ssl_kwargs = _asyncpg_url()
     if not url:
         logger.warning("DATABASE_URL not set — cannot load model from DB.")
         return None
     try:
-        conn = await asyncpg.connect(url)
+        conn = await asyncpg.connect(url, **ssl_kwargs)
         try:
             row = await conn.fetchrow(
                 """
@@ -112,13 +122,13 @@ async def save_to_db(
     then mark all other rows is_active=FALSE.
     Called by training/train.py after a successful training run.
     """
-    url = _asyncpg_url()
+    url, ssl_kwargs = _asyncpg_url()
     if not url:
         logger.error("DATABASE_URL not set — cannot save model to DB.")
         return False
     try:
         data = model_path.read_bytes()
-        conn = await asyncpg.connect(url)
+        conn = await asyncpg.connect(url, **ssl_kwargs)
         try:
             async with conn.transaction():
                 await conn.execute(

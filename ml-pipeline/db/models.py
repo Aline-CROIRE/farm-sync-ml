@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import ssl
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, LargeBinary, String, Text, func
@@ -9,14 +10,31 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-DATABASE_URL = os.environ.get(
+
+def _prepare_db_url(url: str) -> tuple[str, dict]:
+    """
+    Convert a Render PostgreSQL URL for asyncpg:
+      - swap postgresql:// → postgresql+asyncpg://
+      - strip ?sslmode=require (asyncpg rejects it)
+      - return ssl context in connect_args instead
+    """
+    needs_ssl = "sslmode=require" in url
+    for token in ("?sslmode=require", "&sslmode=require", "sslmode=require&"):
+        url = url.replace(token, "")
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    connect_args = {"ssl": ssl.create_default_context()} if needs_ssl else {}
+    return url, connect_args
+
+
+_raw_url = os.environ.get(
     "DATABASE_URL", "postgresql+asyncpg://user:pass@localhost:5432/farmersync"
 )
-# Render supplies postgresql:// — swap scheme for asyncpg driver
-if DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+DATABASE_URL, _connect_args = _prepare_db_url(_raw_url)
 
-engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+engine = create_async_engine(
+    DATABASE_URL, echo=False, pool_pre_ping=True, connect_args=_connect_args
+)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

@@ -3,21 +3,32 @@ from __future__ import annotations
 
 import asyncio
 import os
+import ssl
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 
 config = context.config
 
-# Inject DATABASE_URL from environment (overrides alembic.ini placeholder)
-db_url = os.environ.get("DATABASE_URL", "")
-if db_url.startswith("postgresql://"):
-    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-if db_url:
-    config.set_main_option("sqlalchemy.url", db_url)
+
+def _prepare_db_url(url: str) -> tuple[str, dict]:
+    """Strip sslmode (asyncpg rejects it) and return ssl via connect_args."""
+    needs_ssl = "sslmode=require" in url
+    for token in ("?sslmode=require", "&sslmode=require", "sslmode=require&"):
+        url = url.replace(token, "")
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    connect_args = {"ssl": ssl.create_default_context()} if needs_ssl else {}
+    return url, connect_args
+
+
+_raw_url = os.environ.get("DATABASE_URL", "")
+_db_url, _connect_args = _prepare_db_url(_raw_url)
+if _db_url:
+    config.set_main_option("sqlalchemy.url", _db_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -47,10 +58,10 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    connectable = create_async_engine(
+        _db_url,
         poolclass=pool.NullPool,
+        connect_args=_connect_args,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

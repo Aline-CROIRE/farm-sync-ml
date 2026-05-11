@@ -19,10 +19,10 @@ FEATURE_NAMES: list[str] = [
 
 
 def _sync_engine():
-    """Synchronous engine for use in training scripts (not async)."""
+    """Synchronous engine for use in training scripts (psycopg2, not async)."""
     url = os.environ["DATABASE_URL"]
-    # Strip asyncpg driver if present
     url = url.replace("postgresql+asyncpg://", "postgresql://")
+    # psycopg2 accepts sslmode natively — no stripping needed
     return create_engine(url, pool_pre_ping=True)
 
 
