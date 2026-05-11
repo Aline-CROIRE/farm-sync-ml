@@ -15,8 +15,10 @@ env/
 .env.local
 secrets.json
 
-# ── ML models (large binaries — seed model tracked, retrained versions not) ─
-ml-pipeline/models/xgboost_v[0-9]*.joblib
+# ── ML models ─────────────────────────────────────────────────────────────
+# Only ignore timestamp-versioned retrained models (xgboost_v20240512_1400.joblib)
+# xgboost_v1.joblib is the seed model — it IS committed to git
+ml-pipeline/models/xgboost_v[0-9][0-9][0-9][0-9]*.joblib
 ml-pipeline/models/*.pkl
 
 # ── Generated images / reports (keep source data) ─────────────────────────
