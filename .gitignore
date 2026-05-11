@@ -1,0 +1,37 @@
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# ── Virtual environments ───────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Secrets ───────────────────────────────────────────────────────────────
+.env
+.env.local
+secrets.json
+
+# ── ML models (large binaries — seed model tracked, retrained versions not) ─
+ml-pipeline/models/xgboost_v[0-9]*.joblib
+ml-pipeline/models/*.pkl
+
+# ── Generated images / reports (keep source data) ─────────────────────────
+*.png
+split_report.txt
+model_comparison.txt
+verification_report.txt
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Testing ───────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/

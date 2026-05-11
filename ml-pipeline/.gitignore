@@ -1,0 +1,82 @@
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+MANIFEST
+
+# ── Virtual environments ───────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env.bak
+
+# ── Environment / secrets (keep .env.example tracked) ─────────────────────
+.env
+.env.local
+.env.*.local
+secrets.json
+
+# ── ML models (keep the seed fallback, ignore generated versions) ──────────
+models/xgboost_v[0-9]*.joblib
+models/*.pkl
+# Uncomment to also ignore the seed model (if storing in R2 only):
+# models/xgboost_v1.joblib
+
+# ── Data files ─────────────────────────────────────────────────────────────
+*.csv
+*.parquet
+*.feather
+*.h5
+data/
+
+# ── Database ───────────────────────────────────────────────────────────────
+*.db
+*.sqlite3
+
+# ── Alembic (track migrations, ignore local state) ────────────────────────
+alembic/versions/__pycache__/
+
+# ── Testing / coverage ────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# ── Type checking ─────────────────────────────────────────────────────────
+.mypy_cache/
+.pytype/
+.pyre/
+
+# ── IDE ───────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Render build artifacts ────────────────────────────────────────────────
+.render-buildinfo.json

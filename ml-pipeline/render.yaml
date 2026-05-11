@@ -1,0 +1,79 @@
+services:
+  # ── Web Service: FastAPI prediction server ────────────────────────────────
+  - type: web
+    name: farmersync-ml-api
+    runtime: python
+    region: frankfurt          # closest to Rwanda; change to oregon if preferred
+    plan: starter              # upgrade to standard for production load
+    buildCommand: chmod +x build.sh && ./build.sh
+    startCommand: uvicorn serving.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true    # Render auto-generates a secure random value
+      - key: API_SECRET_TOKEN
+        sync: false            # You supply this manually in the Render dashboard
+      - key: DATABASE_URL
+        fromDatabase:
+          name: farmersync-db
+          property: connectionString
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION
+        value: auto
+      - key: MODEL_VERSION
+        value: v1
+      - key: MIN_SAMPLES_TO_RETRAIN
+        value: "100"
+      - key: MIN_ACCURACY_IMPROVEMENT
+        value: "0.01"
+      - key: ML_API_URL
+        sync: false            # Set to https://farmersync-ml-api.onrender.com
+
+  # ── Cron Job: daily model retraining at 02:00 UTC ────────────────────────
+  - type: cron
+    name: farmersync-retrain-job
+    runtime: python
+    region: frankfurt
+    plan: starter
+    schedule: "0 2 * * *"     # 02:00 UTC every day
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m training.train --job-id cron
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: farmersync-db
+          property: connectionString
+      - key: API_SECRET_TOKEN
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION
+        value: auto
+      - key: MIN_SAMPLES_TO_RETRAIN
+        value: "100"
+      - key: MIN_ACCURACY_IMPROVEMENT
+        value: "0.01"
+      - key: ML_API_URL
+        sync: false
+
+# ── Managed PostgreSQL ────────────────────────────────────────────────────
+databases:
+  - name: farmersync-db
+    plan: starter              # 1 GB storage, upgrade as needed
+    region: frankfurt
+    databaseName: farmersync
+    user: farmersync_user
