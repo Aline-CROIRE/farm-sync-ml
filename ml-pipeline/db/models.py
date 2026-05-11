@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, LargeBinary, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -56,7 +56,7 @@ class PredictionLog(Base):
 
 
 class ModelVersion(Base):
-    """Registry of every trained model, tracks which one is active."""
+    """Registry of every trained model. model_data holds the raw joblib bytes."""
     __tablename__ = "model_versions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -66,6 +66,8 @@ class ModelVersion(Base):
     trained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Model binary stored directly — avoids needing external object storage
+    model_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
 
 async def get_db() -> AsyncSession:  # type: ignore[override]

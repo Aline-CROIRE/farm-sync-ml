@@ -1,4 +1,4 @@
-"""Model loader: downloads from Cloudflare R2 (S3-compatible), falls back to local file."""
+"""Model loader: reads from PostgreSQL (model_versions.model_data), falls back to local file."""
 from __future__ import annotations
 
 import io
@@ -8,9 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-import boto3
+import asyncpg
 import joblib
-from botocore.exceptions import ClientError, NoCredentialsError
 
 logger = logging.getLogger(__name__)
 
@@ -23,21 +22,14 @@ FEATURE_NAMES: list[str] = [
 _LOCAL_FALLBACK = Path(__file__).parent.parent / "models" / "xgboost_v1.joblib"
 
 
-def _s3_client():
-    """Build boto3 client for Cloudflare R2 or standard S3."""
-    endpoint = os.getenv("S3_ENDPOINT_URL")  # None → AWS S3
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-        region_name=os.getenv("AWS_REGION", "auto"),
-    )
+def _asyncpg_url() -> str:
+    """Convert any postgresql:// or postgresql+asyncpg:// URL to plain asyncpg format."""
+    url = os.environ.get("DATABASE_URL", "")
+    return url.replace("postgresql+asyncpg://", "postgresql://")
 
 
 @dataclass
 class ModelBundle:
-    """Holds the loaded model and its metadata."""
     model: object
     version: str
     loaded_at: datetime = field(default_factory=datetime.utcnow)
@@ -48,7 +40,6 @@ class ModelBundle:
     feature_names: list[str] = field(default_factory=lambda: FEATURE_NAMES)
 
 
-# Module-level singleton —— updated by reload_model()
 _bundle: ModelBundle | None = None
 _prediction_counter: int = 0
 
@@ -68,99 +59,127 @@ def total_predictions() -> int:
     return _prediction_counter
 
 
-def _load_from_bytes(data: bytes, version: str) -> ModelBundle:
+def _from_bytes(data: bytes, version: str) -> ModelBundle:
     model = joblib.load(io.BytesIO(data))
     logger.info("Model loaded from bytes, version=%s", version)
     return ModelBundle(model=model, version=version)
 
 
-def _load_local(path: Path, version: str) -> ModelBundle:
+def _from_local(path: Path, version: str) -> ModelBundle:
     model = joblib.load(path)
     logger.info("Model loaded from local file: %s", path)
     return ModelBundle(model=model, version=version)
 
 
-def download_latest_from_r2() -> tuple[bytes, str] | None:
-    """
-    Download the latest model from R2/S3.
-    Returns (model_bytes, key) or None on failure.
-    """
-    bucket = os.getenv("S3_BUCKET")
-    if not bucket:
-        logger.warning("S3_BUCKET not set — skipping R2 download.")
+async def _fetch_from_db() -> tuple[bytes, str] | None:
+    """Query model_versions for the active model's binary. Returns (data, version) or None."""
+    url = _asyncpg_url()
+    if not url:
+        logger.warning("DATABASE_URL not set — cannot load model from DB.")
         return None
     try:
-        s3 = _s3_client()
-        # List objects with prefix "models/" and pick the most-recent by LastModified
-        resp = s3.list_objects_v2(Bucket=bucket, Prefix="models/xgboost_v")
-        objects = resp.get("Contents", [])
-        if not objects:
-            logger.info("No models found in R2 bucket '%s'.", bucket)
+        conn = await asyncpg.connect(url)
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT version, model_data
+                FROM model_versions
+                WHERE is_active = TRUE AND model_data IS NOT NULL
+                ORDER BY trained_at DESC NULLS LAST
+                LIMIT 1
+                """
+            )
+            if row and row["model_data"]:
+                logger.info("Found active model in DB: version=%s", row["version"])
+                return bytes(row["model_data"]), row["version"]
+            logger.info("No active model with data found in DB.")
             return None
-        latest = max(objects, key=lambda o: o["LastModified"])
-        key = latest["Key"]
-        logger.info("Downloading model from R2: s3://%s/%s", bucket, key)
-        obj = s3.get_object(Bucket=bucket, Key=key)
-        data = obj["Body"].read()
-        version = Path(key).stem  # e.g. "xgboost_v20240512_1400"
-        return data, version
-    except (ClientError, NoCredentialsError) as exc:
-        logger.error("R2 download failed: %s", exc)
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.error("DB model fetch failed: %s", exc)
         return None
 
 
-def upload_to_r2(model_path: Path, key: str) -> bool:
-    """Upload a model file to R2/S3. Returns True on success."""
-    bucket = os.getenv("S3_BUCKET")
-    if not bucket:
-        logger.warning("S3_BUCKET not set — skipping upload.")
+async def save_to_db(
+    model_path: Path,
+    version: str,
+    r2_score: float,
+    training_samples: int,
+) -> bool:
+    """
+    Upsert the model binary and metadata into model_versions,
+    then mark all other rows is_active=FALSE.
+    Called by training/train.py after a successful training run.
+    """
+    url = _asyncpg_url()
+    if not url:
+        logger.error("DATABASE_URL not set — cannot save model to DB.")
         return False
     try:
-        s3 = _s3_client()
-        s3.upload_file(str(model_path), bucket, key)
-        logger.info("Uploaded model to R2: s3://%s/%s", bucket, key)
-        return True
-    except (ClientError, NoCredentialsError) as exc:
-        logger.error("R2 upload failed: %s", exc)
+        data = model_path.read_bytes()
+        conn = await asyncpg.connect(url)
+        try:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO model_versions
+                        (version, model_data, r2_score, training_samples, trained_at, is_active)
+                    VALUES ($1, $2, $3, $4, NOW(), TRUE)
+                    ON CONFLICT (version) DO UPDATE
+                        SET model_data        = EXCLUDED.model_data,
+                            r2_score          = EXCLUDED.r2_score,
+                            training_samples  = EXCLUDED.training_samples,
+                            trained_at        = EXCLUDED.trained_at,
+                            is_active         = TRUE
+                    """,
+                    version, data, r2_score, training_samples,
+                )
+                await conn.execute(
+                    "UPDATE model_versions SET is_active = FALSE WHERE version != $1",
+                    version,
+                )
+            logger.info("Model saved to DB: version=%s  size=%d bytes", version, len(data))
+            return True
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.error("DB model save failed: %s", exc)
         return False
 
 
-def load_model_on_startup() -> ModelBundle:
+async def load_model_on_startup() -> ModelBundle:
     """
-    Called once at startup via FastAPI lifespan.
-    Priority: R2/S3  →  local fallback.
+    Priority: PostgreSQL model_versions table → local fallback file.
+    Called once from the FastAPI lifespan.
     """
     global _bundle
     default_version = os.getenv("MODEL_VERSION", "v1")
 
-    result = download_latest_from_r2()
+    result = await _fetch_from_db()
     if result:
         data, version = result
-        _bundle = _load_from_bytes(data, version)
-        # Persist locally as cache
-        local_cache = Path(__file__).parent.parent / "models" / f"{version}.joblib"
-        local_cache.parent.mkdir(parents=True, exist_ok=True)
-        local_cache.write_bytes(data)
+        _bundle = _from_bytes(data, version)
     else:
-        logger.warning("Falling back to local model file.")
+        logger.warning("No model in DB — using local fallback file.")
         if not _LOCAL_FALLBACK.exists():
-            raise FileNotFoundError(f"Local model not found: {_LOCAL_FALLBACK}")
-        _bundle = _load_local(_LOCAL_FALLBACK, default_version)
+            raise FileNotFoundError(f"Local fallback model not found: {_LOCAL_FALLBACK}")
+        _bundle = _from_local(_LOCAL_FALLBACK, default_version)
 
     return _bundle
 
 
-def reload_model() -> ModelBundle:
+async def reload_model() -> ModelBundle:
     """
-    Re-download the latest model from R2 and hot-swap in memory.
-    Called by POST /api/model/reload without restarting the process.
+    Re-fetch the latest active model from PostgreSQL and hot-swap in memory.
+    Called by POST /api/model/reload after retraining.
     """
     global _bundle
-    result = download_latest_from_r2()
+    result = await _fetch_from_db()
     if result:
         data, version = result
-        _bundle = _load_from_bytes(data, version)
-        logger.info("Model hot-reloaded: version=%s", version)
+        _bundle = _from_bytes(data, version)
+        logger.info("Model hot-reloaded from DB: version=%s", version)
     else:
-        logger.warning("reload_model: no new model in R2, keeping current.")
+        logger.warning("reload_model: no model found in DB, keeping current.")
     return _bundle

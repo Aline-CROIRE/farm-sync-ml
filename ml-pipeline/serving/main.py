@@ -87,7 +87,7 @@ def verify_token(
 async def lifespan(app: FastAPI):
     logger.info("Starting up — loading model...")
     try:
-        load_model_on_startup()
+        await load_model_on_startup()
         logger.info("Model ready: version=%s", get_bundle().version)
     except Exception as exc:
         logger.critical("Failed to load model at startup: %s", exc)
@@ -648,7 +648,7 @@ async def trigger_retrain(
 )
 async def model_reload(_token: str = Depends(verify_token)):
     try:
-        bundle = reload_model()
+        bundle = await reload_model()
         return ModelReloadResponse(status="reloaded", model_version=bundle.version)
     except Exception as exc:
         logger.error("Model reload failed: %s", exc)

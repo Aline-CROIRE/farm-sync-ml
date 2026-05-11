@@ -2,7 +2,7 @@
 FarmerSync model retraining script.
 
 Runs as a Render Cron Job (daily at 02:00 UTC) or triggered manually via
-POST /api/retrain.  Requires DATABASE_URL, S3_*, and ML_API_URL env vars.
+POST /api/retrain.  Requires DATABASE_URL, API_SECRET_TOKEN, ML_API_URL.
 
 Usage:
     python -m training.train
@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -23,18 +24,12 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from xgboost import XGBRegressor
 
-# ── ensure project root is on sys.path when run as __main__
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from serving.load_model import FEATURE_NAMES, download_latest_from_r2, upload_to_r2
-from training.data_loader import (
-    _sync_engine,
-    load_csv,
-    load_training_data,
-    mark_as_used,
-)
+from serving.load_model import FEATURE_NAMES, save_to_db
+from training.data_loader import _sync_engine, load_csv, load_training_data, mark_as_used
 from training.evaluate import EvalResult, evaluate, is_improvement
 
 logging.basicConfig(
@@ -59,63 +54,31 @@ XGBOOST_PARAMS = {
 }
 
 
-def _load_current_model() -> tuple[object, EvalResult | None]:
-    """
-    Download and evaluate the current production model from R2.
-    Returns (model_object, eval_result_or_None).
-    """
-    result = download_latest_from_r2()
-    if not result:
-        logger.warning("No current model in R2 — any trained model will be deployed.")
-        return None, None
-    import io  # noqa: PLC0415
-    data, _ = result
-    model = joblib.load(io.BytesIO(data))
-    return model, None  # we'll evaluate both on the same test split
-
-
-def _save_model_metadata(
-    version: str,
-    result: EvalResult,
-    n_train: int,
-) -> None:
-    """Write model version record to PostgreSQL."""
+def _load_current_model_from_db() -> object | None:
+    """Fetch the active model binary from DB using the sync engine."""
     from sqlalchemy import text  # noqa: PLC0415
 
     engine = _sync_engine()
     try:
-        with engine.begin() as conn:
-            conn.execute(
+        with engine.connect() as conn:
+            row = conn.execute(
                 text("""
-                    INSERT INTO model_versions
-                        (version, r2_score, training_samples, trained_at, is_active)
-                    VALUES
-                        (:version, :r2, :samples, :trained_at, TRUE)
-                    ON CONFLICT (version) DO UPDATE
-                        SET r2_score = EXCLUDED.r2_score,
-                            training_samples = EXCLUDED.training_samples,
-                            trained_at = EXCLUDED.trained_at,
-                            is_active = TRUE;
-                """),
-                {
-                    "version": version,
-                    "r2": result.r2,
-                    "samples": n_train,
-                    "trained_at": datetime.utcnow(),
-                },
-            )
-            # Deactivate all other versions
-            conn.execute(
-                text("UPDATE model_versions SET is_active = FALSE WHERE version != :v"),
-                {"v": version},
-            )
-        logger.info("Model metadata saved to DB: version=%s", version)
+                    SELECT model_data FROM model_versions
+                    WHERE is_active = TRUE AND model_data IS NOT NULL
+                    ORDER BY trained_at DESC NULLS LAST LIMIT 1
+                """)
+            ).fetchone()
+        if row and row[0]:
+            import io  # noqa: PLC0415
+            return joblib.load(io.BytesIO(bytes(row[0])))
+        return None
     except Exception as exc:
-        logger.error("Failed to save model metadata: %s", exc)
+        logger.warning("Could not fetch current model from DB: %s", exc)
+        return None
 
 
 def _reload_api() -> None:
-    """Call POST /api/model/reload so the serving process hot-swaps the model."""
+    """Call POST /api/model/reload so the serving process hot-swaps."""
     if not ML_API_URL or not API_TOKEN:
         logger.warning("ML_API_URL or API_SECRET_TOKEN not set — skipping reload call.")
         return
@@ -141,58 +104,50 @@ def train(job_id: str = "manual", csv_path: str | None = None) -> None:
 
     logger.info("Dataset shape: X=%s  y=%s", X.shape, y.shape)
 
-    # ── 2. Train/test split (time-ordered, so no shuffle)
+    # ── 2. Train/test split (time-ordered, no shuffle)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.15, shuffle=False
     )
 
     # ── 3. Train new model
-    logger.info("Training XGBRegressor with params: %s", XGBOOST_PARAMS)
+    logger.info("Training XGBRegressor: %s", XGBOOST_PARAMS)
     new_model = XGBRegressor(**XGBOOST_PARAMS)
-    new_model.fit(
-        X_train, y_train,
-        eval_set=[(X_test, y_test)],
-        verbose=False,
-    )
+    new_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
     new_result = evaluate(new_model, X_test, y_test)
-    logger.info("New model metrics: %s", new_result)
+    logger.info("New model: %s", new_result)
 
-    # ── 4. Compare against current production model
-    current_model, _ = _load_current_model()
+    # ── 4. Compare against current model from DB
+    current_model = _load_current_model_from_db()
     if current_model is not None:
         current_result = evaluate(current_model, X_test, y_test)
-        logger.info("Current model metrics: %s", current_result)
+        logger.info("Current model: %s", current_result)
         if not is_improvement(new_result, current_result, MIN_DELTA):
             logger.info(
-                "New model did not improve by %.1f%% — aborting deployment.",
-                MIN_DELTA * 100,
+                "No improvement of %.1f%% — aborting deployment.", MIN_DELTA * 100
             )
             return
     else:
-        logger.info("No current model to compare — deploying unconditionally.")
+        logger.info("No current model in DB — deploying unconditionally.")
 
-    # ── 5. Save model locally
+    # ── 5. Save model to disk temporarily
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
     version = f"xgboost_v{timestamp}"
     local_path = MODELS_DIR / f"{version}.joblib"
     joblib.dump(new_model, local_path)
     logger.info("Model saved locally: %s", local_path)
 
-    # ── 6. Upload to R2/S3
-    r2_key = f"models/{version}.joblib"
-    uploaded = upload_to_r2(local_path, r2_key)
-    if not uploaded:
-        logger.error("Upload to R2 failed — model not deployed.")
+    # ── 6. Upload binary to PostgreSQL model_versions table
+    saved = asyncio.run(
+        save_to_db(local_path, version, new_result.r2, len(X_train))
+    )
+    if not saved:
+        logger.error("DB save failed — model not deployed.")
         return
 
     # ── 7. Mark training rows as used
-    engine = _sync_engine()
-    mark_as_used(engine)
+    mark_as_used(_sync_engine())
 
-    # ── 8. Save metadata to PostgreSQL
-    _save_model_metadata(version, new_result, len(X_train))
-
-    # ── 9. Hot-reload the serving process
+    # ── 8. Hot-reload the serving process
     _reload_api()
 
     logger.info("=== Retraining job %s complete — deployed %s ===", job_id, version)
@@ -200,8 +155,8 @@ def train(job_id: str = "manual", csv_path: str | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="FarmerSync model retraining")
-    parser.add_argument("--job-id", default="cron", help="Job identifier for logging")
-    parser.add_argument("--csv", default=None, help="Path to a CSV file to use instead of DB")
+    parser.add_argument("--job-id", default="cron")
+    parser.add_argument("--csv", default=None)
     args = parser.parse_args()
     try:
         train(job_id=args.job_id, csv_path=args.csv)
